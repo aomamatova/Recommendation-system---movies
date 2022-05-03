@@ -1,0 +1,266 @@
+---
+title: "Анализ сетей фильмов"
+author: "Маматова Агата, aomamatova"
+output: html_document
+---
+
+```{r message = FALSE, warning=FALSE, echo = F}
+knitr::opts_chunk$set(echo = TRUE, message = FALSE, warning = FALSE)
+
+library(tidytext) 
+library(tidygraph)
+library(tidyverse)
+library(ggplot2) 
+library(tidyr) 
+library(stringr) 
+library(dplyr)
+library(LDAvis) 
+library(topicmodels) 
+library(readr)
+library(ggraph)
+library(igraphdata)
+library(igraph)
+
+movie_net = read_graph("~/shared/minor2_2021/2-tm-net/hw/data/top_movie_net.hml", 
+                        format = "graphml")
+load("~/shared/minor2_2021/2-tm-net/hw/data/metadata.RData")
+
+#Преобразование данных
+metadata=metadata %>% arrange(-item_id)
+
+#Вытащим из названия фильма год его выхода в отдельную колонку
+metadata = metadata %>% mutate(year=str_extract_all(metadata$title, "([:digit:][:digit:][:digit:][:digit:])"))
+
+#Удалим из названия фильма год его выхода
+metadata = metadata %>% mutate(title=str_remove_all(metadata$title, "([:punct:][:digit:][:digit:][:digit:][:digit:][:punct:])"))
+
+
+mng = as_tbl_graph(movie_net)
+V(mng)$director = as.factor(metadata$directedBy)
+V(mng)$name = metadata$title
+V(mng)$year=metadata$year
+```
+
+##### Исследовательские вопросы
+##### 1. Правда ли, что фильмы c наибольшим количеством связей по похожести были выпущены в один промежуток времени?
+##### 2. Правда ли, что фильмы с высоким средним значением рейтинга, посчитанного на основе пользовательских оценок, попадают в одно сообщество по похожести?
+
+
+## Выделение значимых вершин
+
+```{r message = FALSE, warning=FALSE, echo = F}
+#V(mng)
+# 450 вершин
+#E(mng)
+# 4733 связей
+
+#Выделим в отдельный датасет топ-15 фильмов с наибольшим значением degree (количество связей)
+dd=as.data.frame(degree(mng))
+dd$title=row.names(dd)
+names(dd)[1]='degree'
+dd = dd %>% arrange(desc(degree)) 
+dd=dd[1:15,]
+
+#Выделим в отдельный датасет топ-15 фильмов с наибольшим значением betweenness (центральность по посредничеству)
+db=as.data.frame(betweenness(mng))
+db$title=row.names(db)
+names(db)[1]='betweenness'
+db = db %>% arrange(desc(betweenness)) 
+db=db[1:15,]
+
+# Можно рассчитать центральность по близости, но в графе есть вершины без связей, что затрудняет определение центральности по близости 
+dc=as.data.frame(closeness(mng))
+dc$title=row.names(dc)
+names(dc)[1]='closeness'
+dc = dc %>% arrange(desc(closeness)) 
+dc=dc[1:15,]
+
+a=merge(dd, db)
+a=merge(a, dc) %>% arrange(desc(degree))
+a=inner_join(a, metadata, by="title")
+a = select(a, -directedBy, -avgRating, -starring, -imdbId, -item_id )
+
+knitr::kable(a, format = "markdown")
+
+# Подготавливаем данные к визуализации, считаем centrality degree и помечаем как важные значения, которые попали в квантиль > 0.95
+mng_cd = mng %>% 
+  mutate(degree = centrality_degree()) %>% 
+  mutate(important = case_when(
+      degree > quantile(degree, 0.95) ~ TRUE,
+      TRUE ~ FALSE
+    )) %>% filter(important==TRUE)
+
+# Подготавливаем данные к визуализации, считаем centrality closeness и помечаем как важные значения, которые попали в квантиль > 0.95
+mng_cc=mng %>% 
+  mutate(centrality_closeness = centrality_closeness()) %>% 
+  mutate(important = case_when(
+      centrality_closeness > quantile(centrality_closeness, 0.95) ~ TRUE,
+      TRUE ~ FALSE
+    )) %>% filter(important==TRUE)
+
+# Подготавливаем данные к визуализации, считаем centrality betweenness и помечаем как важные значения, которые попали в квантиль > 0.95
+mng_cb=mng %>% 
+  mutate(centrality_betweenness = centrality_betweenness()) %>% 
+  mutate(important = case_when(
+      centrality_betweenness > quantile(centrality_betweenness, 0.95) ~ TRUE,
+      TRUE ~ FALSE
+    )) %>% filter(important==TRUE)
+```
+
+В топ-12 фильмов по количеству связей по degree, betweenness и closeness попали фильмы 1994-2001 гг. 
+
+**Использованные меры центральности: **
+
+*Центральность по degree*
+
+*Центральность по betweenness*
+
+*Центральность по closeness*
+
+## Визуализация
+
+### Центральность вершин по количеству связей
+
+Самыми крупными вершинами (размер вершины определяется ее количеством связей) являются "Матрица", "Форрест Гамп", "Криминальное чтиво".
+
+```{r message = FALSE, warning=FALSE, echo = F}
+ggraph(mng_cd) +
+    geom_edge_link(color = "darkgray", width = 0.3) + 
+    geom_node_point(aes(color=as.numeric(year), size = degree)) + 
+    geom_node_text(aes(label=name), size = 3.0, show.legend = FALSE, repel = TRUE)  +
+  theme_void()
+```
+
+### Центральность вершин по посредничеству
+
+Примечательно, что на график попали и сравнительно более новые фильмы: "Темный рыцарь" 2008г. и "Начало" 2010г. Наиболее крупными вершинами (размер вершины определяется центральностью по посредничеству, которое характеризует долю кратчайших путей, проходящих через данную вершину) являются "Форрест Гамп", "Матрица" и "Храброе сердце".
+
+```{r message = FALSE, warning=FALSE, echo = F}
+ggraph(mng_cb) +
+    geom_edge_link(color = "darkgray", width = 0.3) + 
+    geom_node_point(aes(color=as.numeric(year), size = centrality_betweenness)) + 
+    geom_node_text(aes(label=name), size = 3.0, show.legend = FALSE, repel = TRUE)  +
+  theme_void()
+```
+
+### Центральность вершин по близости
+
+Наиболее крупными вершинами (размер вершины определяется ее центральностью по близости, что означает, что эти вершины находятся наиболее близко к остальным) являются все те же "Матрица", "Форрест Гамп" и "Побег из Шоушенка".  
+
+```{r message = FALSE, warning=FALSE, echo = F}
+ggraph(mng_cc) +
+    geom_edge_link(color = "darkgray", width = 0.3) + 
+    geom_node_point(aes(color=as.numeric(year), size = centrality_closeness)) + 
+    geom_node_text(aes(label=name), size = 3.0, show.legend = FALSE, repel = TRUE)  +
+  theme_void()
+```
+
+### Выводы
+
+```{r message = FALSE, warning=FALSE, echo = F}
+metadata$degree=degree(mng)
+smoothScatter(metadata$year, metadata$degree,nbin = 128, pch = 1, xlab="Год выхода фильма", ylab="Число связей фильма")
+```
+
+В целом наиболее значимыми фильмами являются фильмы, выпущенные в период с 1991 по 2001 год. На скаттерплоте видно: чем новее фильм, тем меньше у него связей по похожести с остальными фильмами. **Следовательно, если брать период в 10 лет (например, с 1991 по 2001гг.), то можно говорить о том, что фильмы с наибольшим количеством связей по похожести были выпущены в один период.**
+
+
+## Выявление групп фильмов
+
+**Использованные меры выделения сообществ: **
+
+Для того, чтобы ответить на вопрос, отфильтруем сеть и оставим только те вершины, для которых средний рейтинг, посчитанный на основе оценок пользователей из survey_answers, имеет значение > 3.2.
+
+```{r message = FALSE, warning=FALSE, echo = F}
+# Оставим только важные значения
+mng_gc = CINNA::giant_component_extract(mng)
+mng_gc = mng_gc[[1]] 
+
+# Посмотрим на оценки пользователей на фильм по результатам опроса. Значение "-1" в оценке означает, что пользователь не определился с оценкой фильма. Уберем его, чтобы оно не мешало посчитать средний рейтинг фильмов
+survey_answers = survey_answers %>% filter(survey_answers$score != -1) 
+
+survey_answers = survey_answers %>% group_by(item_id) %>% summarise(score_mean=mean(score)) %>% ungroup()
+
+# Соединим колонку с посчитанным рейтингом с соответствующими им названиями фильмов
+survey_answers = left_join(survey_answers, metadata)
+survey_answers = select(survey_answers, -directedBy, #-avgRating,
+                        -starring, -imdbId, -item_id) 
+V(mng_gc)$score_mean=survey_answers$score_mean
+
+
+#assortativity_nominal(movie_net,V(movie_net)$directed,directed=F)
+# Удалим вершины, для которых средний рейтинг меньше 3
+mng_mean=delete_vertices(mng_gc, V(mng_gc)$score_mean < 3.2)
+```
+
+
+```{r message = FALSE, warning=FALSE, echo = F}
+#Разбиение через метод edge betweenness
+# Для сравнения сначала посчитаем edge betweenness для графа, отфильтрованного по giant_component_extract
+ebcommune1 <- edge.betweenness.community(mng_gc)
+#membership(ebcommune1) 
+modularity(ebcommune1) 
+# 0.156 
+
+# А теперь для фильмов с посчитанным рейтингом больше 3.2
+ebcommune <- edge.betweenness.community(mng_mean)
+#membership(ebcommune) 
+modularity(ebcommune) 
+
+# 0.449. Разница существенная!
+
+# Что насчет подхода, основанного на случайных путях?
+wtcommune <- walktrap.community(mng_mean)
+#membership(wtcommune) 
+modularity(wtcommune)
+# 0.321. Значение чуть поменьше, но все равно довольно высокое
+
+# А что насчет иерархического подхода?
+fgcommune <- fastgreedy.community(mng_mean)
+#membership(fgcommune) 
+modularity(fgcommune)
+# 0.464
+```
+
+## Визуализация
+
+Посмотрим на разбиение по сообществам по методу Edge betweenness для значимых вершин. Сообществ получилось много.
+
+```{r message = FALSE, warning=FALSE, echo = F}
+plot(ebcommune1, mng_gc,vertex.size =6,
+     vertex.label = NA,
+     edge.color = "black",main="Сообщества по Edge betweenness для значимых вершин")
+```
+
+**Разбиение на сообщества по методу Edge betweenness,  Walktrap, Fast-Greedy для вершин, посчитанный средний рейтинг которых больше 3.2.**
+
+```{r message = FALSE, warning=FALSE, echo = F}
+
+plot(ebcommune, mng_mean,vertex.size =6,
+     vertex.label = NA,
+     edge.color = "black",main="Сообщества по Edge betweenness \n с посчитанным рейтингом больше 3.2")
+
+plot(wtcommune, mng_mean,vertex.size =6,
+     vertex.label = NA,
+     edge.color = "black",main="Сообщества по Walktrap \n с посчитанным рейтингом больше 3.2")
+
+plot(fgcommune, mng_mean,vertex.size =6,
+     vertex.label = NA,
+     edge.color = "black",main="Сообщества по Fast-Greedy \n с посчитанным рейтингом больше 3.2")
+
+```
+
+
+#### Выводы
+
+Показатель модулярности по Edge betweenness для значимых вершин равен **0.156**, а для вершин с посчитанным средним рейтингом больше 3.2 показатель модулярности равен **0.449**, что говорит о существенно лучшем качестве разбиенияи на сообщества фильмов с высоким средним рейтингом.
+Нет, фильмы с высоким средним рейтингом не попадают в одно сообщество по похожести. Однако, по методу Fast-Greedy фильмы с высоким средним рейтингом получилось разбить на 4 больших сообщества (не считая не связанны вершин, образовывающих самостоятельное сообщество).
+
+
+## Общие выводы
+
+В целом, для фильмов с большим количеством degree, характерны высокие значения по другим мерам центральности: betweenness, closeness. Самыми "важными" фильмами в сети являются "Матрица", "Форрест Гамп", "Побед из Шоушенка", "Криминальное чтиво", "Парк Юрского периода" - и, действительно, эти фильмы всемирно известны и любимы зрителями.
+
+Прослеживается следующая тенденция: более старые фильмы (1990-2000 гг.) имеют больше связей по похожести, чем сравнительно новые фильмы (2005-2015 гг.). Возможно, это связано с тем, что данные по были собраны несколько лет назад, и между сравнительно новыми фильмами еще не успело сформироваться большое количество связей по похожести.
+
+Примечательно, что значения среднего рейтинга, посчитанные на основе оценок пользователей из survey_answers, значительно ниже значений колонки avgRating из metadata. 
